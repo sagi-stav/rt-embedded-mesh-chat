@@ -1,0 +1,12 @@
+# CLion specific
+.idea/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.out
+sender.out
+receive.out
+
+# Git setup
+.DS_Store
