@@ -68,4 +68,26 @@ int  net_send_recv(ClientContext *_ctx, const TLVMessage *_request,
  */
 void net_disconnect(ClientContext *_ctx);
 
+/* ─── Management API (client_mng.c) ──────────────────────────────────────── */
+
+/**
+ * @brief Logout: notify server, kill all group windows, clear context.
+ * @param[in] _ctx - Client context
+ * @return 0 on success, -1 on failure
+ */
+int client_logout(ClientContext *_ctx);
+
+/**
+ * @brief Exit: send exit msg to server, close TCP, clear context, terminate.
+ * @param[in] _ctx - Client context
+ */
+void client_exit(ClientContext *_ctx);
+
+/**
+ * @brief Close a single group session (kill sender/receiver PIDs).
+ * @param[in] _session - GroupSession to close
+ * @note PIDs teardown requires IPC (Epic 4); stubbed for now.
+ */
+void client_close_group_session(GroupSession *_session);
+
 #endif /* __CLIENT_H__ */
