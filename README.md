@@ -110,4 +110,4 @@ chat_project/
 
 ## 👨‍💻 Authors
 
-* **Sagi Stav** * **[Your Partner's Name]** Designed and developed as part of an advanced Data Communication and Network Programming curriculum.
+* **Sagi Stav** * **Tehila Menasheof** Designed and developed as part of an advanced Data Communication and Network Programming curriculum.
