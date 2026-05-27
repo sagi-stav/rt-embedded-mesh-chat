@@ -55,7 +55,7 @@ void ui_run_screen1(ClientContext *_ctx)
 
             case 3:
                 printf("[*] Goodbye!\n");
-                net_disconnect(_ctx);
+                client_exit(_ctx);
                 return;
 
             default:
@@ -327,29 +327,7 @@ static int handle_leave_group(ClientContext *_ctx)
 
 static int handle_logout(ClientContext *_ctx)
 {
-    TLVMessage request, response;
+    return client_logout(_ctx);
+}
 
-    if (build_simple_msg(&request, MSG_LOGOUT) != 0)
-    {
-        return -1;
-    }
-
-    if (net_send_recv(_ctx, &request, &response) != 0)
-    {
-        printf("[-] Server communication failed.\n");
-        return -1;
-    }
-
-    if (response.tag != (uint8_t)MSG_SUCCESS)
-    {
-        print_server_error(&response);
-        return -1;
-    }
-
-    _ctx->state              = CLIENT_STATE_CONNECTED;
-    _ctx->active_group_count = 0;
-    memset(_ctx->username, 0, sizeof(_ctx->username));
-
-    return 0;
-}/* src/client_ui.c - stub */
 typedef int keep_compiler_happy;
