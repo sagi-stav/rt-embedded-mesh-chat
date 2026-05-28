@@ -1,8 +1,11 @@
 #ifndef __LIMITS_H__
 #define __LIMITS_H__
 
+#include <sys/types.h>
+
 /* ─── Network ─────────────────────────────────────── */
 #define SERVER_PORT             9090
+#define SERVER_IP               "127.0.0.1"
 #define SERVER_BACKLOG          10
 #define MAX_CLIENTS             64
 #define BUFFER_SIZE             256
@@ -28,4 +31,10 @@
 /* ─── TLV Protocol ────────────────────────────────── */
 #define TLV_MAX_VALUE_LEN       256
 
+/* ─── IPC Message Queue Struct ────────────────────── */
+typedef struct {
+    long  mtype;       /* Required by System V: message type (must be > 0) */
+    pid_t process_pid; /* The PID of the spawned C process                 */
+    int   is_sender;   /* Flag: 1 for Sender, 0 for Receiver               */
+} IpcPidMessage;
 #endif /* __LIMITS_H__ */

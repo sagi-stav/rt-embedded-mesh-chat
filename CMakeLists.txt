@@ -44,4 +44,4 @@ target_link_libraries(client_app data_structures)
 
 # ─── Multicast Apps ────────────────────────────────────
 add_executable(sender.out src/sender.c)
-add_executable(receive.out src/receiver.c)
+add_executable(receiver.out src/receiver.c)

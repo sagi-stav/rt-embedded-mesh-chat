@@ -13,6 +13,7 @@ typedef enum {
     MSG_EXIT        = 4,
     MSG_JOIN_GROUP  = 5,
     MSG_LEAVE_GROUP = 6,
+    MSG_CREATE_GROUP = 7,
 
     /* Server → Client */
     MSG_SUCCESS     = 100,
@@ -111,5 +112,14 @@ int build_error_msg(TLVMessage *_msg, ErrorCode _code);
  * @return 0 on success, -1 on invalid input or overflow
  */
 int build_group_info_msg(TLVMessage *_msg, const char *_ip, uint16_t _port);
+
+/**
+ * @brief Parse a MSG_GROUP_INFO response into IP string and port.
+ * @param[in]  _msg  - TLVMessage with tag MSG_GROUP_INFO
+ * @param[out] _ip   - Output buffer for IP string (must be >= 16 bytes)
+ * @param[out] _port - Output port in host byte order
+ * @return 0 on success, -1 on malformed message
+ */
+int parse_group_info(const TLVMessage *_msg, char *_ip, uint16_t *_port);
 
 #endif /* __PROTOCOL_H__ */

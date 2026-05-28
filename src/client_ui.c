@@ -55,7 +55,7 @@ void ui_run_screen1(ClientContext *_ctx)
 
             case 3:
                 printf("[*] Goodbye!\n");
-                net_disconnect(_ctx);
+                client_exit(_ctx);
                 return;
 
             default:
@@ -243,9 +243,16 @@ static int handle_create_group(ClientContext *_ctx)
     char     group_name[MAX_GROUP_NAME_LEN];
     TLVMessage request, response;
 
+    /* Prevent overflow on the client state array */
+    if (_ctx->active_group_count >= MAX_GROUPS)
+    {
+        printf("[-] Maximum number of active groups reached.\n");
+        return -1;
+    }
+
     read_input("  Group name: ", group_name, sizeof(group_name));
 
-    if (build_group_msg(&request, MSG_JOIN_GROUP, group_name) != 0)
+    if (build_group_msg(&request, MSG_CREATE_GROUP, group_name) != 0)
     {
         printf("[-] Invalid group name.\n");
         return -1;
@@ -263,7 +270,23 @@ static int handle_create_group(ClientContext *_ctx)
         return -1;
     }
 
-    printf("[+] Group created successfully!\n");
+    char ip[16];
+    uint16_t port;
+    if (parse_group_info(&response, ip, &port) != 0)
+    {
+        printf("[-] Malformed group info received from server.\n");
+        return -1;
+    }
+
+    /* Save the new group session state */
+    GroupSession *session = &_ctx->active_groups[_ctx->active_group_count];
+    memset(session, 0, sizeof(GroupSession));
+    strncpy(session->group_name, group_name, MAX_GROUP_NAME_LEN - 1);
+    strncpy(session->multicast_ip, ip, sizeof(session->multicast_ip) - 1);
+    session->multicast_port = port;
+    _ctx->active_group_count++;
+    client_spawn_chat_windows(_ctx, session);
+    printf("[+] Group created successfully! IP: %s, Port: %u\n", ip, port);
     return 0;
 }
 
@@ -271,8 +294,25 @@ static int handle_join_group(ClientContext *_ctx)
 {
     char     group_name[MAX_GROUP_NAME_LEN];
     TLVMessage request, response;
+    int i;
+
+    if (_ctx->active_group_count >= MAX_GROUPS)
+    {
+        printf("[-] Maximum number of active groups reached.\n");
+        return -1;
+    }
 
     read_input("  Group name: ", group_name, sizeof(group_name));
+
+    /* Check if already joined locally */
+    for (i = 0; i < _ctx->active_group_count; i++)
+    {
+        if (strncmp(_ctx->active_groups[i].group_name, group_name, MAX_GROUP_NAME_LEN) == 0)
+        {
+            printf("[-] You are already connected to group '%s'.\n", group_name);
+            return -1;
+        }
+    }
 
     if (build_group_msg(&request, MSG_JOIN_GROUP, group_name) != 0)
     {
@@ -292,7 +332,24 @@ static int handle_join_group(ClientContext *_ctx)
         return -1;
     }
 
-    printf("[+] Joined group '%s' successfully!\n", group_name);
+    char ip[16];
+    uint16_t port;
+    if (parse_group_info(&response, ip, &port) != 0)
+    {
+        printf("[-] Malformed group info received from server.\n");
+        return -1;
+    }
+
+    /* Save the joined group session state */
+    GroupSession *session = &_ctx->active_groups[_ctx->active_group_count];
+    memset(session, 0, sizeof(GroupSession));
+    strncpy(session->group_name, group_name, MAX_GROUP_NAME_LEN - 1);
+    strncpy(session->multicast_ip, ip, sizeof(session->multicast_ip) - 1);
+    session->multicast_port = port;
+    _ctx->active_group_count++;
+
+    client_spawn_chat_windows(_ctx, session);
+    printf("[+] Joined group '%s' successfully! IP: %s, Port: %u\n", group_name, ip, port);
     return 0;
 }
 
@@ -300,8 +357,26 @@ static int handle_leave_group(ClientContext *_ctx)
 {
     char     group_name[MAX_GROUP_NAME_LEN];
     TLVMessage request, response;
+    int target_index = -1;
+    int i;
 
     read_input("  Group name to leave: ", group_name, sizeof(group_name));
+
+    /* Ensure we are tracking this group locally before contacting the server */
+    for (i = 0; i < _ctx->active_group_count; i++)
+    {
+        if (strncmp(_ctx->active_groups[i].group_name, group_name, MAX_GROUP_NAME_LEN) == 0)
+        {
+            target_index = i;
+            break;
+        }
+    }
+
+    if (target_index < 0)
+    {
+        printf("[-] You are not connected to group '%s' locally.\n", group_name);
+        return -1;
+    }
 
     if (build_group_msg(&request, MSG_LEAVE_GROUP, group_name) != 0)
     {
@@ -321,35 +396,25 @@ static int handle_leave_group(ClientContext *_ctx)
         return -1;
     }
 
+    /* Teardown the local state (this will eventually kill the chat terminals) */
+    client_close_group_session(&_ctx->active_groups[target_index]);
+
+    /* Shift the array to remove the gap */
+    for (i = target_index; i < _ctx->active_group_count - 1; i++)
+    {
+        _ctx->active_groups[i] = _ctx->active_groups[i + 1];
+    }
+
+    _ctx->active_group_count--;
+    memset(&_ctx->active_groups[_ctx->active_group_count], 0, sizeof(GroupSession));
+
     printf("[+] Left group '%s'.\n", group_name);
     return 0;
 }
 
 static int handle_logout(ClientContext *_ctx)
 {
-    TLVMessage request, response;
+    return client_logout(_ctx);
+}
 
-    if (build_simple_msg(&request, MSG_LOGOUT) != 0)
-    {
-        return -1;
-    }
-
-    if (net_send_recv(_ctx, &request, &response) != 0)
-    {
-        printf("[-] Server communication failed.\n");
-        return -1;
-    }
-
-    if (response.tag != (uint8_t)MSG_SUCCESS)
-    {
-        print_server_error(&response);
-        return -1;
-    }
-
-    _ctx->state              = CLIENT_STATE_CONNECTED;
-    _ctx->active_group_count = 0;
-    memset(_ctx->username, 0, sizeof(_ctx->username));
-
-    return 0;
-}/* src/client_ui.c - stub */
 typedef int keep_compiler_happy;

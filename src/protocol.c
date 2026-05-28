@@ -75,9 +75,10 @@ int build_auth_msg(TLVMessage *_msg, MessageTag _tag,
 
 int build_group_msg(TLVMessage *_msg, MessageTag _tag, const char *_group_name)
 {
-    if (!_msg || !_group_name)                              return -1;
-    if (_tag != MSG_JOIN_GROUP && _tag != MSG_LEAVE_GROUP)  return -1;
-    if (!is_valid_str(_group_name, MAX_GROUP_NAME_LEN))     return -1;
+    if (!_msg || !_group_name) return -1;
+    /* Added MSG_CREATE_GROUP to the allowed tags */
+    if (_tag != MSG_JOIN_GROUP && _tag != MSG_LEAVE_GROUP && _tag != MSG_CREATE_GROUP) return -1;
+    if (!is_valid_str(_group_name, MAX_GROUP_NAME_LEN)) return -1;
 
     size_t glen = strlen(_group_name);
 
@@ -144,6 +145,37 @@ int build_group_info_msg(TLVMessage *_msg, const char *_ip, uint16_t _port)
     memcpy(&_msg->value[offset], _ip, ip_len);
     offset += (uint8_t)ip_len;
     memcpy(&_msg->value[offset], &port_network, 2);
+
+    return 0;
+}
+
+int parse_group_info(const TLVMessage *_msg, char *_ip, uint16_t *_port)
+{
+    if (!_msg || !_ip || !_port)
+    {
+        return -1;
+    }
+
+    if (_msg->tag != (uint8_t)MSG_GROUP_INFO || _msg->length < 3)
+    {
+        return -1;
+    }
+
+    /* Format: [ ip_len (1) | ip_string | port (2 bytes, network order) ] */
+    uint8_t ip_len = _msg->value[0];
+
+    /* Validate: need ip_len + 1 (ip_len byte) + 2 (port bytes) */
+    if ((uint8_t)(1 + ip_len + 2) > _msg->length || ip_len >= 16)
+    {
+        return -1;
+    }
+
+    memcpy(_ip, &_msg->value[1], ip_len);
+    _ip[ip_len] = '\0';
+
+    uint16_t port_network;
+    memcpy(&port_network, &_msg->value[1 + ip_len], 2);
+    *_port = ntohs(port_network);
 
     return 0;
 }
