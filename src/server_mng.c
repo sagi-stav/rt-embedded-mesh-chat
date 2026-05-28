@@ -204,11 +204,25 @@ static void handle_exit(ServerContext *_ctx, int _fd) {
     net_send_msg(_fd, &reply);
 }
 
-static void handle_join_group(ServerContext *_ctx, int _fd, const TLVMessage *_msg) {
+// shared: add _fd to grp if not already a member
+static int add_member(int _fd, GroupRecord *_grp) {
+    TLVMessage reply;
+    ListItr end = ListItrEnd(_grp->members);
+    ListItr itr = ListItrForEach(ListItrBegin(_grp->members), end, match_fd, &_fd);
+    if (itr != end) return 0; // already in group, fine
+    if (_grp->member_count >= MAX_MEMBERS_PER_GROUP) {
+        build_error_msg(&reply, ERR_GROUP_FULL);
+        net_send_msg(_fd, &reply); return -1;
+    }
+    ListPushTail(_grp->members, (void *)(intptr_t)_fd);
+    _grp->member_count++;
+    return 0;
+}
+
+static void handle_create_group(ServerContext *_ctx, int _fd, const TLVMessage *_msg) {
     TLVMessage reply;
     if (!_ctx || !_msg) return;
 
-    // only logged-in users can join groups
     UserRecord *u = find_user_by_fd(_ctx, _fd);
     if (!u || !u->logged_in) {
         build_error_msg(&reply, ERR_USER_NOT_FOUND);
@@ -221,59 +235,76 @@ static void handle_join_group(ServerContext *_ctx, int _fd, const TLVMessage *_m
         net_send_msg(_fd, &reply); return;
     }
 
+    // error if group already exists
+    void *dummy = NULL;
+    if (HashMap_Find(_ctx->group_map, gname, &dummy) == MAP_SUCCESS) {
+        build_error_msg(&reply, ERR_GROUP_FULL); // no ERR_GROUP_EXISTS in protocol
+        net_send_msg(_fd, &reply); return;
+    }
+
+    if (QueueIsEmpty(_ctx->mcast_queue)) {
+        build_error_msg(&reply, ERR_SERVER_FULL);
+        net_send_msg(_fd, &reply); return;
+    }
+    McastEntry *me = NULL;
+    QueueRemove(_ctx->mcast_queue, (void **)&me);
+
+    GroupRecord *grp = (GroupRecord *)calloc(1, sizeof(GroupRecord));
+    if (!grp) {
+        QueueInsert(_ctx->mcast_queue, me);
+        build_error_msg(&reply, ERR_SERVER_FULL);
+        net_send_msg(_fd, &reply); return;
+    }
+    strncpy(grp->name,     gname,  MAX_GROUP_NAME_LEN - 1);
+    strncpy(grp->mcast_ip, me->ip, sizeof(grp->mcast_ip) - 1);
+    grp->mcast_ip[sizeof(grp->mcast_ip) - 1] = '\0';
+    grp->mcast_port   = me->port;
+    grp->members      = ListCreate();
+    grp->member_count = 0;
+
+    if (!grp->members) {
+        QueueInsert(_ctx->mcast_queue, me); free(grp);
+        build_error_msg(&reply, ERR_SERVER_FULL);
+        net_send_msg(_fd, &reply); return;
+    }
+    if (HashMap_Insert(_ctx->group_map, grp->name, grp) != MAP_SUCCESS) {
+        QueueInsert(_ctx->mcast_queue, me); ListDestroy(&grp->members, NULL); free(grp);
+        build_error_msg(&reply, ERR_SERVER_FULL);
+        net_send_msg(_fd, &reply); return;
+    }
+    free(me);
+    printf("[server] '%s' created group '%s' at %s:%u\n", u->username, grp->name, grp->mcast_ip, grp->mcast_port);
+
+    if (add_member(_fd, grp) != 0) return;
+    build_group_info_msg(&reply, grp->mcast_ip, grp->mcast_port);
+    net_send_msg(_fd, &reply);
+}
+
+static void handle_join_group(ServerContext *_ctx, int _fd, const TLVMessage *_msg) {
+    TLVMessage reply;
+    if (!_ctx || !_msg) return;
+
+    UserRecord *u = find_user_by_fd(_ctx, _fd);
+    if (!u || !u->logged_in) {
+        build_error_msg(&reply, ERR_USER_NOT_FOUND);
+        net_send_msg(_fd, &reply); return;
+    }
+
+    char gname[MAX_GROUP_NAME_LEN];
+    if (parse_group_value(_msg, gname) != 0) {
+        build_error_msg(&reply, ERR_GROUP_NOT_FOUND);
+        net_send_msg(_fd, &reply); return;
+    }
+
+    // error if group does not exist
     GroupRecord *grp = NULL;
     if (HashMap_Find(_ctx->group_map, gname, (void **)&grp) != MAP_SUCCESS) {
-        // group doesn't exist — create it
-        if (QueueIsEmpty(_ctx->mcast_queue)) {
-            build_error_msg(&reply, ERR_SERVER_FULL);
-            net_send_msg(_fd, &reply); return;
-        }
-        McastEntry *me = NULL;
-        QueueRemove(_ctx->mcast_queue, (void **)&me);
-
-        grp = (GroupRecord *)calloc(1, sizeof(GroupRecord));
-        if (!grp) {
-            QueueInsert(_ctx->mcast_queue, me);
-            build_error_msg(&reply, ERR_SERVER_FULL);
-            net_send_msg(_fd, &reply); return;
-        }
-        strncpy(grp->name,     gname,  MAX_GROUP_NAME_LEN - 1);
-        strncpy(grp->mcast_ip, me->ip, sizeof(grp->mcast_ip) - 1);
-        grp->mcast_ip[sizeof(grp->mcast_ip) - 1] = '\0';
-        grp->mcast_port   = me->port;
-        grp->members      = ListCreate();
-        grp->member_count = 0;
-
-        if (!grp->members) {
-            QueueInsert(_ctx->mcast_queue, me);
-            free(grp);
-            build_error_msg(&reply, ERR_SERVER_FULL);
-            net_send_msg(_fd, &reply); return;
-        }
-        if (HashMap_Insert(_ctx->group_map, grp->name, grp) != MAP_SUCCESS) {
-            QueueInsert(_ctx->mcast_queue, me);
-            ListDestroy(&grp->members, NULL);
-            free(grp);
-            build_error_msg(&reply, ERR_SERVER_FULL);
-            net_send_msg(_fd, &reply); return;
-        }
-        free(me);
-        printf("[server] created group '%s' at %s:%u\n", grp->name, grp->mcast_ip, grp->mcast_port);
+        build_error_msg(&reply, ERR_GROUP_NOT_FOUND);
+        net_send_msg(_fd, &reply); return;
     }
 
-    // add fd only if not already a member (idempotent)
-    ListItr end = ListItrEnd(grp->members);
-    ListItr itr = ListItrForEach(ListItrBegin(grp->members), end, match_fd, &_fd);
-    if (itr == end) {
-        if (grp->member_count >= MAX_MEMBERS_PER_GROUP) {
-            build_error_msg(&reply, ERR_GROUP_FULL);
-            net_send_msg(_fd, &reply); return;
-        }
-        ListPushTail(grp->members, (void *)(intptr_t)_fd);
-        grp->member_count++;
-        printf("[server] '%s' joined '%s'\n", u->username, grp->name);
-    }
-
+    if (add_member(_fd, grp) != 0) return;
+    printf("[server] '%s' joined '%s'\n", u->username, grp->name);
     build_group_info_msg(&reply, grp->mcast_ip, grp->mcast_port);
     net_send_msg(_fd, &reply);
 }
@@ -320,6 +351,7 @@ int dispatch_message(ServerContext *_ctx, int _fd, const TLVMessage *_msg) {
         case MSG_LOGIN:       handle_login(_ctx, _fd, _msg);       return 0;
         case MSG_LOGOUT:      handle_logout(_ctx, _fd);            return 0;
         case MSG_EXIT:        handle_exit(_ctx, _fd);              return -1;
+        case MSG_CREATE_GROUP: handle_create_group(_ctx, _fd, _msg); return 0;
         case MSG_JOIN_GROUP:  handle_join_group(_ctx, _fd, _msg);  return 0;
         case MSG_LEAVE_GROUP: handle_leave_group(_ctx, _fd, _msg); return 0;
         default: {

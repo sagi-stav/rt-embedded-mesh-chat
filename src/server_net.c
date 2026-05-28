@@ -89,7 +89,8 @@ ServerContext *server_create(void) {
     ctx->mcast_queue = QueueCreate(MULTICAST_POOL_SIZE);
     if (!ctx->mcast_queue) goto fail;
 
-    /* Pre-load pool: 224.0.0.1:5000  through  224.0.0.{N}:{5000+N-1} */
+    /* Pre-load pool: 224.0.0.1 through 224.0.0.{N}, all on MULTICAST_BASE_PORT.
+     * Groups are distinguished by IP only — all share the same port. */
     uint32_t base_addr = ntohl(inet_addr(MULTICAST_BASE_IP));
     for (int i = 0; i < MULTICAST_POOL_SIZE; i++) {
         McastEntry *entry = (McastEntry *) malloc(sizeof(McastEntry));
@@ -97,7 +98,7 @@ ServerContext *server_create(void) {
 
         uint32_t addr = htonl(base_addr + (uint32_t)i);
         inet_ntop(AF_INET, &addr, entry->ip, sizeof(entry->ip));
-        entry->port = (uint16_t) (MULTICAST_BASE_PORT + i);
+        entry->port = MULTICAST_BASE_PORT; /* same port for all groups */
 
         if (QueueInsert(ctx->mcast_queue, entry) != QUEUE_SUCCESS) {
             free(entry);
