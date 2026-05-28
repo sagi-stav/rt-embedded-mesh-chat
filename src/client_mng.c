@@ -1,12 +1,17 @@
 #include "client.h"
 #include "protocol.h"
 #include "limits.h"
-
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>   /* close()  */
 #include <signal.h>   /* kill()   */
 #include <stdlib.h>   /* exit()   */
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/types.h>
 
 /* ─── Static Forward Declarations ────────────────────────────────────────── */
 static void close_all_group_sessions(ClientContext *_ctx);
@@ -110,6 +115,58 @@ void client_close_group_session(GroupSession *_session)
 
     /* Clear session data */
     memset(_session, 0, sizeof(GroupSession));
+}
+
+int client_spawn_chat_windows(ClientContext *_ctx, GroupSession *_session) {
+    char cmd[512];
+    int mq_id = msgget(IPC_MSG_KEY, 0666 | IPC_CREAT);
+
+    if (mq_id < 0)
+    {
+        perror("[-] client_spawn: msgget failed");
+        return -1;
+    }
+
+    /* Flush the queue from previous runs before spawning new processes */
+    IpcPidMessage flush_msg;
+    while (msgrcv(mq_id, &flush_msg, sizeof(flush_msg) - sizeof(long), 1, IPC_NOWAIT) > 0);
+
+    /* 1. Spawn Receiver (Top Window - Chat History) */
+    snprintf(cmd, sizeof(cmd), "gnome-terminal --geometry=80x20 -- ./receiver.out %s %s",
+             _session->multicast_ip, _ctx->username);
+    if (system(cmd) == -1) {
+        perror("[-] system() failed for receiver");
+    }
+    /* 2. Spawn Sender (Bottom Window - Input Area) */
+    snprintf(cmd, sizeof(cmd), "gnome-terminal --geometry=80x6 -- ./sender.out %s %s",
+             _session->multicast_ip, _ctx->username);
+    if (system(cmd) == -1) {
+        perror("[-] system() failed for sender");
+    }
+    /* 3. Block and wait for exactly 2 PID reports */
+    IpcPidMessage msg;
+    int received = 0;
+    while (received < 2)
+    {
+        /* msgrcv blocks (waits) until a message arrives */
+        if (msgrcv(mq_id, &msg, sizeof(msg) - sizeof(long), 1, 0) > 0)
+        {
+            if (msg.is_sender)
+            {
+                _session->sender_pid = msg.process_pid;
+            }
+            else
+            {
+                _session->receiver_pid = msg.process_pid;
+            }
+            received++;
+        }
+    }
+
+    printf("[+] IPC Linked: Sender PID=%d, Receiver PID=%d\n",
+           _session->sender_pid, _session->receiver_pid);
+
+    return 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */

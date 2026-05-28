@@ -90,4 +90,12 @@ void client_exit(ClientContext *_ctx);
  */
 void client_close_group_session(GroupSession *_session);
 
+/**
+ * @brief Spawns sender/receiver terminals and captures their PIDs via IPC.
+ * @param[in] _ctx     - Client context (for username)
+ * @param[in] _session - The group session to populate with PIDs
+ * @return 0 on success, -1 on failure
+ */
+int client_spawn_chat_windows(ClientContext *_ctx, GroupSession *_session);
+
 #endif /* __CLIENT_H__ */

@@ -75,9 +75,10 @@ int build_auth_msg(TLVMessage *_msg, MessageTag _tag,
 
 int build_group_msg(TLVMessage *_msg, MessageTag _tag, const char *_group_name)
 {
-    if (!_msg || !_group_name)                              return -1;
-    if (_tag != MSG_JOIN_GROUP && _tag != MSG_LEAVE_GROUP)  return -1;
-    if (!is_valid_str(_group_name, MAX_GROUP_NAME_LEN))     return -1;
+    if (!_msg || !_group_name) return -1;
+    /* Added MSG_CREATE_GROUP to the allowed tags */
+    if (_tag != MSG_JOIN_GROUP && _tag != MSG_LEAVE_GROUP && _tag != MSG_CREATE_GROUP) return -1;
+    if (!is_valid_str(_group_name, MAX_GROUP_NAME_LEN)) return -1;
 
     size_t glen = strlen(_group_name);
 

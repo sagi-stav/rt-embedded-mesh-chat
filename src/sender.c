@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
 
 int main(int argc, char *argv[])
 {
@@ -48,6 +51,25 @@ int main(int argc, char *argv[])
         close(sock);
         return 1;
     }
+
+    /* --- IPC: Report PID to the Main Client --- */
+    int mq_id = msgget(IPC_MSG_KEY, 0666 | IPC_CREAT);
+    if (mq_id >= 0)
+    {
+        IpcPidMessage msg;
+        msg.mtype = 1;
+        msg.process_pid = getpid();
+        msg.is_sender = 1;
+
+        /* Send message. It is standard to subtract mtype size from total size */
+        msgsnd(mq_id, &msg, sizeof(msg) - sizeof(long), 0);
+    }
+    /* --- Terminal Styling --- */
+    /* Force Black background (40), Bright White text (97), Clear screen (2J), Move to top (H) */
+    printf("\033[40;97m\033[2J\033[H");
+
+    /* Set Terminal Window Title dynamically */
+    printf("\033]0;Mesh Chat - Sender Area\007");
 
     printf("[sender] Ready. Type messages (Ctrl+C to quit).\n");
     printf("[sender] Sending as '%s' to %s:%d\n",

@@ -285,7 +285,7 @@ static int handle_create_group(ClientContext *_ctx)
     strncpy(session->multicast_ip, ip, sizeof(session->multicast_ip) - 1);
     session->multicast_port = port;
     _ctx->active_group_count++;
-
+    client_spawn_chat_windows(_ctx, session);
     printf("[+] Group created successfully! IP: %s, Port: %u\n", ip, port);
     return 0;
 }
@@ -348,6 +348,7 @@ static int handle_join_group(ClientContext *_ctx)
     session->multicast_port = port;
     _ctx->active_group_count++;
 
+    client_spawn_chat_windows(_ctx, session);
     printf("[+] Joined group '%s' successfully! IP: %s, Port: %u\n", group_name, ip, port);
     return 0;
 }
