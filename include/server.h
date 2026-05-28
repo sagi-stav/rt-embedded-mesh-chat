@@ -48,10 +48,10 @@ typedef struct {
  *          socket_fd is set on login and cleared (-1) on logout or disconnect.
  */
 typedef struct {
-    char   username[MAX_USERNAME_LEN]; /**< Unique username (the HashMap key)          */
-    size_t password_hash;              /**< djb2 hash of password — never stored plain */
-    int    logged_in;                  /**< 1 = authenticated, 0 = not                 */
-    int    socket_fd;                  /**< Active TCP fd, -1 if not connected          */
+    char username[MAX_USERNAME_LEN]; /**< Unique username (the HashMap key) */
+    char password[MAX_PASSWORD_LEN]; /**< Password stored as plain text     */
+    int  logged_in;                  /**< 1 = authenticated, 0 = not        */
+    int  socket_fd;                  /**< Active TCP fd, -1 if not connected */
 } UserRecord;
 
 
