@@ -417,4 +417,3 @@ static int handle_logout(ClientContext *_ctx)
     return client_logout(_ctx);
 }
 
-typedef int keep_compiler_happy;
