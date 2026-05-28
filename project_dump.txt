@@ -1,0 +1,1463 @@
+========== FILE: CMakeLists.txt ==========
+
+cmake_minimum_required(VERSION 3.20)
+project(rt_embedded_mesh_chat C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -pedantic -g")
+
+include_directories(include)
+
+# ─── Data Structures Shared Library ───────────────────
+add_library(data_structures SHARED
+        src/ds/HashMap.c
+        src/ds/vector.c
+        src/ds/genqueue.c
+        src/ds/gen_dlist.c
+)
+target_include_directories(data_structures PUBLIC include)
+
+set_target_properties(data_structures PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib
+)
+
+# ─── Shared Sources ────────────────────────────────────
+set(SHARED_SOURCES src/protocol.c)
+
+# ─── Server ────────────────────────────────────────────
+add_executable(server_app
+        src/server_main.c
+        src/server_mng.c
+        src/server_net.c
+        ${SHARED_SOURCES}
+)
+target_link_libraries(server_app data_structures)
+
+# ─── Client ────────────────────────────────────────────
+add_executable(client_app
+        src/client_main.c
+        src/client_mng.c
+        src/client_net.c
+        src/client_ui.c
+        ${SHARED_SOURCES}
+)
+target_link_libraries(client_app data_structures)
+
+# ─── Multicast Apps ────────────────────────────────────
+add_executable(sender.out src/sender.c)
+add_executable(receive.out src/receiver.c)
+
+========== FILE: include/client.h ==========
+
+#ifndef __CLIENT_H__
+#define __CLIENT_H__
+
+#include "protocol.h"
+#include "limits.h"
+#include <sys/types.h>
+/* ─── Client State ────────────────────────────────────────────────────────── */
+typedef enum {
+    CLIENT_STATE_DISCONNECTED = 0,
+    CLIENT_STATE_CONNECTED,        /* TCP open, not logged in  */
+    CLIENT_STATE_LOGGED_IN         /* Authenticated, can join groups */
+} ClientState;
+
+/* ─── Active Group Info (received from server on join) ───────────────────── */
+typedef struct {
+    char     group_name[MAX_GROUP_NAME_LEN];
+    char     multicast_ip[16];
+    uint16_t multicast_port;
+    pid_t    sender_pid;
+    pid_t    receiver_pid;
+} GroupSession;
+
+/* ─── Client Context (single global instance) ────────────────────────────── */
+typedef struct {
+    int          server_fd;                          /* TCP socket to server  */
+    ClientState  state;
+    char         username[MAX_USERNAME_LEN];
+    GroupSession active_groups[MAX_GROUPS];
+    int          active_group_count;
+} ClientContext;
+
+/* ─── UI API (client_ui.c) ───────────────────────────────────────────────── */
+
+/**
+ * @brief Run Screen 1: Registration / Login / Exit loop.
+ * @param[in] _ctx - Client context
+ * Blocks until user successfully logs in or chooses Exit.
+ */
+void ui_run_screen1(ClientContext *_ctx);
+
+/**
+ * @brief Run Screen 2: Group management loop (post-login).
+ * @param[in] _ctx - Client context
+ * Blocks until user logs out.
+ */
+void ui_run_screen2(ClientContext *_ctx);
+
+/* ─── Network API (client_net.c) — stubs for now ────────────────────────── */
+
+/**
+ * @brief Connect TCP socket to server.
+ * @return 0 on success, -1 on failure
+ */
+int  net_connect(ClientContext *_ctx);
+
+/**
+ * @brief Send a TLVMessage to the server and receive the response.
+ * @param[in]  _ctx      - Client context
+ * @param[in]  _request  - Message to send
+ * @param[out] _response - Response from server
+ * @return 0 on success, -1 on failure
+ */
+int  net_send_recv(ClientContext *_ctx, const TLVMessage *_request,
+                   TLVMessage *_response);
+
+/**
+ * @brief Gracefully close the TCP connection.
+ */
+void net_disconnect(ClientContext *_ctx);
+
+/* ─── Management API (client_mng.c) ──────────────────────────────────────── */
+
+/**
+ * @brief Logout: notify server, kill all group windows, clear context.
+ * @param[in] _ctx - Client context
+ * @return 0 on success, -1 on failure
+ */
+int client_logout(ClientContext *_ctx);
+
+/**
+ * @brief Exit: send exit msg to server, close TCP, clear context, terminate.
+ * @param[in] _ctx - Client context
+ */
+void client_exit(ClientContext *_ctx);
+
+/**
+ * @brief Close a single group session (kill sender/receiver PIDs).
+ * @param[in] _session - GroupSession to close
+ * @note PIDs teardown requires IPC (Epic 4); stubbed for now.
+ */
+void client_close_group_session(GroupSession *_session);
+
+#endif /* __CLIENT_H__ */
+
+========== FILE: include/protocol.h ==========
+
+#ifndef __PROTOCOL_H__
+#define __PROTOCOL_H__
+
+#include <stdint.h>
+#include "limits.h"
+
+/* ─── Message Tags ────────────────────────────────────────────────────────── */
+typedef enum {
+    /* Client → Server */
+    MSG_REGISTER    = 1,
+    MSG_LOGIN       = 2,
+    MSG_LOGOUT      = 3,
+    MSG_EXIT        = 4,
+    MSG_JOIN_GROUP  = 5,
+    MSG_LEAVE_GROUP = 6,
+    MSG_CREATE_GROUP = 7,
+
+    /* Server → Client */
+    MSG_SUCCESS     = 100,
+    MSG_ERROR       = 101,
+    MSG_GROUP_INFO  = 102
+} MessageTag;
+
+/* ─── Error Codes ─────────────────────────────────────────────────────────── */
+typedef enum {
+    ERR_NONE              = 0,
+    ERR_USER_EXISTS       = 1,
+    ERR_USER_NOT_FOUND    = 2,
+    ERR_WRONG_PASSWORD    = 3,
+    ERR_ALREADY_LOGGED_IN = 4,
+    ERR_GROUP_NOT_FOUND   = 5,
+    ERR_GROUP_FULL        = 6,
+    ERR_NOT_IN_GROUP      = 7,
+    ERR_SERVER_FULL       = 8
+} ErrorCode;
+
+/* ─── TLV Message ─────────────────────────────────────────────────────────── */
+typedef struct {
+    uint8_t tag;                    /* MessageTag                            */
+    uint8_t length;                 /* Length of value[] in bytes (max 255)  */
+    uint8_t value[TLV_MAX_VALUE_LEN];
+} TLVMessage;
+
+/* ─── Public API ──────────────────────────────────────────────────────────── */
+
+/**
+ * @brief Serialize a TLVMessage into a flat byte buffer for TCP transmission.
+ * @param[in]  _msg     - TLVMessage to serialize
+ * @param[out] _buf     - Output buffer (must be >= 2 + _msg->length bytes)
+ * @param[out] _out_len - Total bytes written to _buf
+ * @return 0 on success, -1 on invalid input
+ */
+int serialize_msg(const TLVMessage *_msg, uint8_t *_buf, uint8_t *_out_len);
+
+/**
+ * @brief Deserialize a flat byte buffer received from TCP into a TLVMessage.
+ * @param[in]  _buf - Input buffer received from TCP
+ * @param[in]  _len - Number of bytes in _buf (must be >= 2)
+ * @param[out] _msg - Output TLVMessage
+ * @return 0 on success, -1 on malformed input
+ */
+int deserialize_msg(const uint8_t *_buf, uint8_t _len, TLVMessage *_msg);
+
+/**
+ * @brief Build a MSG_REGISTER or MSG_LOGIN message.
+ * @param[out] _msg      - Output TLVMessage
+ * @param[in]  _tag      - MSG_REGISTER or MSG_LOGIN
+ * @param[in]  _username - Null-terminated username string
+ * @param[in]  _password - Null-terminated password string
+ * @return 0 on success, -1 on invalid input or overflow
+ */
+int build_auth_msg(TLVMessage *_msg, MessageTag _tag,
+                   const char *_username, const char *_password);
+
+/**
+ * @brief Build a MSG_JOIN_GROUP or MSG_LEAVE_GROUP message.
+ * @param[out] _msg        - Output TLVMessage
+ * @param[in]  _tag        - MSG_JOIN_GROUP or MSG_LEAVE_GROUP
+ * @param[in]  _group_name - Null-terminated group name string
+ * @return 0 on success, -1 on invalid input or overflow
+ */
+int build_group_msg(TLVMessage *_msg, MessageTag _tag, const char *_group_name);
+
+/**
+ * @brief Build a simple tag-only message (MSG_LOGOUT, MSG_EXIT).
+ * @param[out] _msg - Output TLVMessage
+ * @param[in]  _tag - MSG_LOGOUT or MSG_EXIT
+ * @return 0 on success, -1 on invalid input
+ */
+int build_simple_msg(TLVMessage *_msg, MessageTag _tag);
+
+/**
+ * @brief Build a MSG_SUCCESS response.
+ * @param[out] _msg - Output TLVMessage
+ * @return 0 on success, -1 on invalid input
+ */
+int build_success_msg(TLVMessage *_msg);
+
+/**
+ * @brief Build a MSG_ERROR response.
+ * @param[out] _msg  - Output TLVMessage
+ * @param[in]  _code - ErrorCode to send
+ * @return 0 on success, -1 on invalid input
+ */
+int build_error_msg(TLVMessage *_msg, ErrorCode _code);
+
+/**
+ * @brief Build a MSG_GROUP_INFO response.
+ * @param[out] _msg  - Output TLVMessage
+ * @param[in]  _ip   - Null-terminated multicast IP string (e.g. "224.0.0.1")
+ * @param[in]  _port - Multicast port in host byte order
+ * @return 0 on success, -1 on invalid input or overflow
+ */
+int build_group_info_msg(TLVMessage *_msg, const char *_ip, uint16_t _port);
+
+/**
+ * @brief Parse a MSG_GROUP_INFO response into IP string and port.
+ * @param[in]  _msg  - TLVMessage with tag MSG_GROUP_INFO
+ * @param[out] _ip   - Output buffer for IP string (must be >= 16 bytes)
+ * @param[out] _port - Output port in host byte order
+ * @return 0 on success, -1 on malformed message
+ */
+int parse_group_info(const TLVMessage *_msg, char *_ip, uint16_t *_port);
+
+#endif /* __PROTOCOL_H__ */
+
+========== FILE: include/limits.h ==========
+
+#ifndef __LIMITS_H__
+#define __LIMITS_H__
+
+/* ─── Network ─────────────────────────────────────── */
+#define SERVER_PORT             9090
+#define SERVER_IP               "127.0.0.1"
+#define SERVER_BACKLOG          10
+#define MAX_CLIENTS             64
+#define BUFFER_SIZE             256
+
+/* ─── Authentication ──────────────────────────────── */
+#define MAX_USERNAME_LEN        32
+#define MAX_PASSWORD_LEN        64
+
+/* ─── Groups ──────────────────────────────────────── */
+#define MAX_GROUPS              16
+#define MAX_GROUP_NAME_LEN      32
+#define MAX_MEMBERS_PER_GROUP   32
+
+/* ─── Multicast Pool ──────────────────────────────── */
+#define MULTICAST_POOL_SIZE     16
+#define MULTICAST_BASE_IP       "224.0.0.1"
+#define MULTICAST_BASE_PORT     5000
+
+/* ─── IPC ─────────────────────────────────────────── */
+#define IPC_MSG_KEY             0x1234
+#define IPC_MSG_MAX_SIZE        64
+
+/* ─── TLV Protocol ────────────────────────────────── */
+#define TLV_MAX_VALUE_LEN       256
+
+#endif /* __LIMITS_H__ */
+
+========== FILE: src/client_main.c ==========
+
+#include "client.h"
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+
+int main(void)
+{
+    ClientContext ctx;
+
+    /* Zero-initialize the entire context */
+    memset(&ctx, 0, sizeof(ClientContext));
+    ctx.server_fd = -1;
+    ctx.state     = CLIENT_STATE_DISCONNECTED;
+
+    if (net_connect(&ctx) != 0)
+    {
+        fprintf(stderr, "[-] Failed to connect to server at port %d.\n", SERVER_PORT);
+        return 1;
+    }
+
+    printf("[+] Connected to server.\n");
+
+    ui_run_screen1(&ctx);
+
+    return 0;
+}
+
+========== FILE: src/client_ui.c ==========
+
+#include "client.h"
+#include "protocol.h"
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/* ─── Static Forward Declarations ────────────────────────────────────────── */
+static void     screen1_print_menu(void);
+static void     screen2_print_menu(void);
+static void     read_input(const char *_prompt, char *_buf, size_t _max_len);
+static int      handle_register(ClientContext *_ctx);
+static int      handle_login(ClientContext *_ctx);
+static int      handle_create_group(ClientContext *_ctx);
+static int      handle_join_group(ClientContext *_ctx);
+static int      handle_leave_group(ClientContext *_ctx);
+static int      handle_logout(ClientContext *_ctx);
+static void     print_server_error(const TLVMessage *_response);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          PUBLIC API                                         */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+void ui_run_screen1(ClientContext *_ctx)
+{
+    int choice;
+
+    while (1)
+    {
+        screen1_print_menu();
+        if (scanf("%d", &choice) != 1)
+        {
+            /* Flush bad input */
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n'); /* flush newline */
+
+        switch (choice)
+        {
+            case 1:
+                if (handle_register(_ctx) == 0)
+                {
+                    printf("[+] Registration successful! Please log in.\n");
+                }
+                break;
+
+            case 2:
+                if (handle_login(_ctx) == 0)
+                {
+                    printf("[+] Login successful! Welcome, %s.\n", _ctx->username);
+                    ui_run_screen2(_ctx);
+                }
+                break;
+
+            case 3:
+                printf("[*] Goodbye!\n");
+                client_exit(_ctx);
+                return;
+
+            default:
+                printf("[-] Invalid option. Please try again.\n");
+                break;
+        }
+    }
+}
+
+void ui_run_screen2(ClientContext *_ctx)
+{
+    int choice;
+
+    while (1)
+    {
+        screen2_print_menu();
+        if (scanf("%d", &choice) != 1)
+        {
+            while (getchar() != '\n');
+            continue;
+        }
+        while (getchar() != '\n');
+
+        switch (choice)
+        {
+            case 1:
+                handle_create_group(_ctx);
+                break;
+
+            case 2:
+                handle_join_group(_ctx);
+                break;
+
+            case 3:
+                handle_leave_group(_ctx);
+                break;
+
+            case 4:
+                if (handle_logout(_ctx) == 0)
+                {
+                    printf("[+] Logged out. Returning to main screen.\n");
+                    return; /* Back to Screen 1 */
+                }
+                break;
+
+            default:
+                printf("[-] Invalid option. Please try again.\n");
+                break;
+        }
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          STATIC HELPERS                                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+static void screen1_print_menu(void)
+{
+    printf("\n╔══════════════════════════════╗\n");
+    printf("║      LAN Mesh Chat           ║\n");
+    printf("╠══════════════════════════════╣\n");
+    printf("║  1. Register                 ║\n");
+    printf("║  2. Login                    ║\n");
+    printf("║  3. Exit                     ║\n");
+    printf("╚══════════════════════════════╝\n");
+    printf("Choice: ");
+}
+
+static void screen2_print_menu(void)
+{
+    printf("\n╔══════════════════════════════╗\n");
+    printf("║       Group Management       ║\n");
+    printf("╠══════════════════════════════╣\n");
+    printf("║  1. Create Group             ║\n");
+    printf("║  2. Join Group               ║\n");
+    printf("║  3. Leave Group              ║\n");
+    printf("║  4. Logout                   ║\n");
+    printf("╚══════════════════════════════╝\n");
+    printf("Choice: ");
+}
+
+static void read_input(const char *_prompt, char *_buf, size_t _max_len)
+{
+    printf("%s", _prompt);
+    if (fgets(_buf, (int)_max_len, stdin) != NULL)
+    {
+        /* Strip trailing newline */
+        size_t len = strlen(_buf);
+        if (len > 0 && _buf[len - 1] == '\n')
+        {
+            _buf[len - 1] = '\0';
+        }
+    }
+}
+
+static void print_server_error(const TLVMessage *_response)
+{
+    if (_response->tag != (uint8_t)MSG_ERROR || _response->length < 1)
+    {
+        printf("[-] Unknown server error.\n");
+        return;
+    }
+
+    switch ((ErrorCode)_response->value[0])
+    {
+        case ERR_USER_EXISTS:       printf("[-] Username already taken.\n");         break;
+        case ERR_USER_NOT_FOUND:    printf("[-] Username not found.\n");             break;
+        case ERR_WRONG_PASSWORD:    printf("[-] Incorrect password.\n");             break;
+        case ERR_ALREADY_LOGGED_IN: printf("[-] User already logged in.\n");         break;
+        case ERR_GROUP_NOT_FOUND:   printf("[-] Group does not exist.\n");           break;
+        case ERR_GROUP_FULL:        printf("[-] Group is full.\n");                  break;
+        case ERR_NOT_IN_GROUP:      printf("[-] You are not in this group.\n");      break;
+        case ERR_SERVER_FULL:       printf("[-] Server is full.\n");                 break;
+        default:                    printf("[-] Unknown error code.\n");             break;
+    }
+}
+
+static int handle_register(ClientContext *_ctx)
+{
+    char     username[MAX_USERNAME_LEN];
+    char     password[MAX_PASSWORD_LEN];
+    TLVMessage request, response;
+
+    read_input("  Username: ", username, sizeof(username));
+    read_input("  Password: ", password, sizeof(password));
+
+    if (build_auth_msg(&request, MSG_REGISTER, username, password) != 0)
+    {
+        printf("[-] Invalid input.\n");
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        printf("[-] Server communication failed.\n");
+        return -1;
+    }
+
+    if (response.tag != (uint8_t)MSG_SUCCESS)
+    {
+        print_server_error(&response);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int handle_login(ClientContext *_ctx)
+{
+    char     username[MAX_USERNAME_LEN];
+    char     password[MAX_PASSWORD_LEN];
+    TLVMessage request, response;
+
+    read_input("  Username: ", username, sizeof(username));
+    read_input("  Password: ", password, sizeof(password));
+
+    if (build_auth_msg(&request, MSG_LOGIN, username, password) != 0)
+    {
+        printf("[-] Invalid input.\n");
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        printf("[-] Server communication failed.\n");
+        return -1;
+    }
+
+    if (response.tag != (uint8_t)MSG_SUCCESS)
+    {
+        print_server_error(&response);
+        return -1;
+    }
+
+    /* Save username in context for display */
+    strncpy(_ctx->username, username, MAX_USERNAME_LEN - 1);
+    _ctx->username[MAX_USERNAME_LEN - 1] = '\0';
+    _ctx->state = CLIENT_STATE_LOGGED_IN;
+
+    return 0;
+}
+
+static int handle_create_group(ClientContext *_ctx)
+{
+    char     group_name[MAX_GROUP_NAME_LEN];
+    TLVMessage request, response;
+
+    /* Prevent overflow on the client state array */
+    if (_ctx->active_group_count >= MAX_GROUPS)
+    {
+        printf("[-] Maximum number of active groups reached.\n");
+        return -1;
+    }
+
+    read_input("  Group name: ", group_name, sizeof(group_name));
+
+    if (build_group_msg(&request, MSG_CREATE_GROUP, group_name) != 0)
+    {
+        printf("[-] Invalid group name.\n");
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        printf("[-] Server communication failed.\n");
+        return -1;
+    }
+
+    if (response.tag != (uint8_t)MSG_GROUP_INFO)
+    {
+        print_server_error(&response);
+        return -1;
+    }
+
+    char ip[16];
+    uint16_t port;
+    if (parse_group_info(&response, ip, &port) != 0)
+    {
+        printf("[-] Malformed group info received from server.\n");
+        return -1;
+    }
+
+    /* Save the new group session state */
+    GroupSession *session = &_ctx->active_groups[_ctx->active_group_count];
+    memset(session, 0, sizeof(GroupSession));
+    strncpy(session->group_name, group_name, MAX_GROUP_NAME_LEN - 1);
+    strncpy(session->multicast_ip, ip, sizeof(session->multicast_ip) - 1);
+    session->multicast_port = port;
+    _ctx->active_group_count++;
+
+    printf("[+] Group created successfully! IP: %s, Port: %u\n", ip, port);
+    return 0;
+}
+
+static int handle_join_group(ClientContext *_ctx)
+{
+    char     group_name[MAX_GROUP_NAME_LEN];
+    TLVMessage request, response;
+    int i;
+
+    if (_ctx->active_group_count >= MAX_GROUPS)
+    {
+        printf("[-] Maximum number of active groups reached.\n");
+        return -1;
+    }
+
+    read_input("  Group name: ", group_name, sizeof(group_name));
+
+    /* Check if already joined locally */
+    for (i = 0; i < _ctx->active_group_count; i++)
+    {
+        if (strncmp(_ctx->active_groups[i].group_name, group_name, MAX_GROUP_NAME_LEN) == 0)
+        {
+            printf("[-] You are already connected to group '%s'.\n", group_name);
+            return -1;
+        }
+    }
+
+    if (build_group_msg(&request, MSG_JOIN_GROUP, group_name) != 0)
+    {
+        printf("[-] Invalid group name.\n");
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        printf("[-] Server communication failed.\n");
+        return -1;
+    }
+
+    if (response.tag != (uint8_t)MSG_GROUP_INFO)
+    {
+        print_server_error(&response);
+        return -1;
+    }
+
+    char ip[16];
+    uint16_t port;
+    if (parse_group_info(&response, ip, &port) != 0)
+    {
+        printf("[-] Malformed group info received from server.\n");
+        return -1;
+    }
+
+    /* Save the joined group session state */
+    GroupSession *session = &_ctx->active_groups[_ctx->active_group_count];
+    memset(session, 0, sizeof(GroupSession));
+    strncpy(session->group_name, group_name, MAX_GROUP_NAME_LEN - 1);
+    strncpy(session->multicast_ip, ip, sizeof(session->multicast_ip) - 1);
+    session->multicast_port = port;
+    _ctx->active_group_count++;
+
+    printf("[+] Joined group '%s' successfully! IP: %s, Port: %u\n", group_name, ip, port);
+    return 0;
+}
+
+static int handle_leave_group(ClientContext *_ctx)
+{
+    char     group_name[MAX_GROUP_NAME_LEN];
+    TLVMessage request, response;
+    int target_index = -1;
+    int i;
+
+    read_input("  Group name to leave: ", group_name, sizeof(group_name));
+
+    /* Ensure we are tracking this group locally before contacting the server */
+    for (i = 0; i < _ctx->active_group_count; i++)
+    {
+        if (strncmp(_ctx->active_groups[i].group_name, group_name, MAX_GROUP_NAME_LEN) == 0)
+        {
+            target_index = i;
+            break;
+        }
+    }
+
+    if (target_index < 0)
+    {
+        printf("[-] You are not connected to group '%s' locally.\n", group_name);
+        return -1;
+    }
+
+    if (build_group_msg(&request, MSG_LEAVE_GROUP, group_name) != 0)
+    {
+        printf("[-] Invalid group name.\n");
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        printf("[-] Server communication failed.\n");
+        return -1;
+    }
+
+    if (response.tag != (uint8_t)MSG_SUCCESS)
+    {
+        print_server_error(&response);
+        return -1;
+    }
+
+    /* Teardown the local state (this will eventually kill the chat terminals) */
+    client_close_group_session(&_ctx->active_groups[target_index]);
+
+    /* Shift the array to remove the gap */
+    for (i = target_index; i < _ctx->active_group_count - 1; i++)
+    {
+        _ctx->active_groups[i] = _ctx->active_groups[i + 1];
+    }
+
+    _ctx->active_group_count--;
+    memset(&_ctx->active_groups[_ctx->active_group_count], 0, sizeof(GroupSession));
+
+    printf("[+] Left group '%s'.\n", group_name);
+    return 0;
+}
+
+static int handle_logout(ClientContext *_ctx)
+{
+    return client_logout(_ctx);
+}
+
+typedef int keep_compiler_happy;
+
+
+========== FILE: src/client_mng.c ==========
+
+#include "client.h"
+#include "protocol.h"
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>   /* close()  */
+#include <signal.h>   /* kill()   */
+#include <stdlib.h>   /* exit()   */
+
+/* ─── Static Forward Declarations ────────────────────────────────────────── */
+static void close_all_group_sessions(ClientContext *_ctx);
+static void clear_client_context(ClientContext *_ctx);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          PUBLIC API                                         */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+int client_logout(ClientContext *_ctx)
+{
+    TLVMessage request;
+    TLVMessage response;
+
+    if (!_ctx || _ctx->state != CLIENT_STATE_LOGGED_IN)
+    {
+        return -1;
+    }
+
+    /* Step 1: Notify server */
+    if (build_simple_msg(&request, MSG_LOGOUT) != 0)
+    {
+        return -1;
+    }
+
+    if (net_send_recv(_ctx, &request, &response) != 0)
+    {
+        fprintf(stderr, "[-] Logout: server communication failed.\n");
+        /* Continue teardown regardless */
+    }
+
+    if (response.tag != (uint8_t)MSG_SUCCESS)
+    {
+        fprintf(stderr, "[-] Logout: server returned error.\n");
+        /* Continue teardown regardless */
+    }
+
+    /* Step 2: Kill all open chat windows (sender/receiver processes) */
+    close_all_group_sessions(_ctx);
+
+    /* Step 3: Clear session state — keep TCP open, return to Screen 1 */
+    clear_client_context(_ctx);
+    _ctx->state = CLIENT_STATE_CONNECTED;
+
+    return 0;
+}
+
+void client_exit(ClientContext *_ctx)
+{
+    TLVMessage request;
+    TLVMessage response;
+
+    if (!_ctx)
+    {
+        exit(1);
+    }
+
+    /* Step 1: Notify server if connected */
+    if (_ctx->state != CLIENT_STATE_DISCONNECTED && _ctx->server_fd >= 0)
+    {
+        if (build_simple_msg(&request, MSG_EXIT) == 0)
+        {
+            /* Best-effort send — ignore errors on exit path */
+            net_send_recv(_ctx, &request, &response);
+        }
+    }
+
+    /* Step 2: Kill all open chat windows */
+    close_all_group_sessions(_ctx);
+
+    /* Step 3: Close TCP socket */
+    net_disconnect(_ctx);
+
+    /* Step 4: Clear all context memory */
+    clear_client_context(_ctx);
+
+    printf("[*] Goodbye!\n");
+    exit(0);
+}
+
+void client_close_group_session(GroupSession *_session)
+{
+    if (!_session)
+    {
+        return;
+    }
+
+    /* Kill sender process if alive */
+    if (_session->sender_pid > 0)
+    {
+        kill(_session->sender_pid, SIGTERM);
+        _session->sender_pid = 0;
+    }
+
+    /* Kill receiver process if alive */
+    if (_session->receiver_pid > 0)
+    {
+        kill(_session->receiver_pid, SIGTERM);
+        _session->receiver_pid = 0;
+    }
+
+    /* Clear session data */
+    memset(_session, 0, sizeof(GroupSession));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          STATIC HELPERS                                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+static void close_all_group_sessions(ClientContext *_ctx)
+{
+    int i;
+    for (i = 0; i < _ctx->active_group_count; i++)
+    {
+        client_close_group_session(&_ctx->active_groups[i]);
+    }
+    _ctx->active_group_count = 0;
+}
+
+static void clear_client_context(ClientContext *_ctx)
+{
+    memset(_ctx->username,      0, sizeof(_ctx->username));
+    memset(_ctx->active_groups, 0, sizeof(_ctx->active_groups));
+    _ctx->active_group_count = 0;
+}
+
+========== FILE: src/client_net.c ==========
+
+#include "client.h"
+#include "protocol.h"
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+/* ─── Static Forward Declarations ────────────────────────────────────────── */
+static int  send_all(int _fd, const uint8_t *_buf, size_t _len);
+static int  recv_all(int _fd, uint8_t *_buf, size_t _len);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          PUBLIC API                                         */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+int net_connect(ClientContext *_ctx)
+{
+    if (!_ctx)
+    {
+        return -1;
+    }
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+    {
+        perror("[-] net_connect: socket creation failed");
+        return -1;
+    }
+
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family      = AF_INET;
+    server_addr.sin_port        = htons(SERVER_PORT);
+    server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    {
+        perror("[-] net_connect: connect failed");
+        close(sock);
+        return -1;
+    }
+
+    _ctx->server_fd = sock;
+    _ctx->state     = CLIENT_STATE_CONNECTED;
+
+    return 0;
+}
+
+int net_send_recv(ClientContext *_ctx, const TLVMessage *_request,
+                  TLVMessage *_response)
+{
+    if (!_ctx || !_request || !_response)
+    {
+        return -1;
+    }
+
+    if (_ctx->server_fd < 0)
+    {
+        fprintf(stderr, "[-] net_send_recv: not connected\n");
+        return -1;
+    }
+
+    /* ── Serialize and send ── */
+    uint8_t send_buf[TLV_MAX_VALUE_LEN + 2];
+    uint8_t out_len = 0;
+
+    if (serialize_msg(_request, send_buf, &out_len) != 0)
+    {
+        fprintf(stderr, "[-] net_send_recv: serialization failed\n");
+        return -1;
+    }
+
+    if (send_all(_ctx->server_fd, send_buf, out_len) != 0)
+    {
+        fprintf(stderr, "[-] net_send_recv: send failed\n");
+        return -1;
+    }
+
+    /* ── Receive header (2 bytes: tag + length) ── */
+    uint8_t header[2];
+    if (recv_all(_ctx->server_fd, header, 2) != 0)
+    {
+        fprintf(stderr, "[-] net_send_recv: recv header failed\n");
+        return -1;
+    }
+
+    uint8_t tag    = header[0];
+    uint8_t length = header[1];
+
+    /* ── Receive value ── */
+    uint8_t recv_buf[TLV_MAX_VALUE_LEN + 2];
+    recv_buf[0] = tag;
+    recv_buf[1] = length;
+
+    if (length > 0)
+    {
+        if (recv_all(_ctx->server_fd, &recv_buf[2], length) != 0)
+        {
+            fprintf(stderr, "[-] net_send_recv: recv value failed\n");
+            return -1;
+        }
+    }
+
+    /* ── Deserialize response ── */
+    if (deserialize_msg(recv_buf, (uint8_t)(2 + length), _response) != 0)
+    {
+        fprintf(stderr, "[-] net_send_recv: deserialization failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+void net_disconnect(ClientContext *_ctx)
+{
+    if (!_ctx || _ctx->server_fd < 0)
+    {
+        return;
+    }
+
+    close(_ctx->server_fd);
+    _ctx->server_fd = -1;
+    _ctx->state     = CLIENT_STATE_DISCONNECTED;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          STATIC HELPERS                                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Send exactly _len bytes — handles partial sends */
+static int send_all(int _fd, const uint8_t *_buf, size_t _len)
+{
+    size_t total_sent = 0;
+
+    while (total_sent < _len)
+    {
+        ssize_t sent = send(_fd, _buf + total_sent, _len - total_sent, 0);
+        if (sent <= 0)
+        {
+            return -1;
+        }
+        total_sent += (size_t)sent;
+    }
+
+    return 0;
+}
+
+/* Receive exactly _len bytes — handles partial recvs */
+static int recv_all(int _fd, uint8_t *_buf, size_t _len)
+{
+    size_t total_recv = 0;
+
+    while (total_recv < _len)
+    {
+        ssize_t received = recv(_fd, _buf + total_recv, _len - total_recv, 0);
+        if (received <= 0)
+        {
+            return -1;
+        }
+        total_recv += (size_t)received;
+    }
+
+    return 0;
+}
+
+========== FILE: src/protocol.c ==========
+
+#include "protocol.h"
+#include "limits.h"
+
+#include <string.h>   /* memcpy, strlen */
+#include <stdint.h>
+#include <arpa/inet.h> /* htons          */
+
+/* ─── Static Forward Declarations ────────────────────────────────────────── */
+static int is_valid_str(const char *_str, size_t _max_len);
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          PUBLIC API                                         */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+int serialize_msg(const TLVMessage *_msg, uint8_t *_buf, uint8_t *_out_len)
+{
+    if (!_msg || !_buf || !_out_len)
+    {
+        return -1;
+    }
+
+    _buf[0] = _msg->tag;
+    _buf[1] = _msg->length;
+    memcpy(&_buf[2], _msg->value, _msg->length);
+
+    *_out_len = (uint8_t)(2 + _msg->length);
+    return 0;
+}
+
+int deserialize_msg(const uint8_t *_buf, uint8_t _len, TLVMessage *_msg)
+{
+    if (!_buf || !_msg || _len < 2)
+    {
+        return -1;
+    }
+
+    _msg->tag    = _buf[0];
+    _msg->length = _buf[1];
+
+    if (_msg->length > (_len - 2))
+    {
+        return -1;
+    }
+
+    memcpy(_msg->value, &_buf[2], _msg->length);
+    return 0;
+}
+
+int build_auth_msg(TLVMessage *_msg, MessageTag _tag,
+                   const char *_username, const char *_password)
+{
+    if (!_msg || !_username || !_password)          return -1;
+    if (_tag != MSG_REGISTER && _tag != MSG_LOGIN)  return -1;
+    if (!is_valid_str(_username, MAX_USERNAME_LEN)) return -1;
+    if (!is_valid_str(_password, MAX_PASSWORD_LEN)) return -1;
+
+    size_t ulen = strlen(_username);
+    size_t plen = strlen(_password);
+
+    /* Format: [ ulen (1) | username | plen (1) | password ] */
+    if ((1 + ulen + 1 + plen) > TLV_MAX_VALUE_LEN) return -1;
+
+    _msg->tag    = (uint8_t)_tag;
+    _msg->length = (uint8_t)(1 + ulen + 1 + plen);
+
+    uint8_t offset = 0;
+    _msg->value[offset++] = (uint8_t)ulen;
+    memcpy(&_msg->value[offset], _username, ulen);
+    offset += (uint8_t)ulen;
+    _msg->value[offset++] = (uint8_t)plen;
+    memcpy(&_msg->value[offset], _password, plen);
+
+    return 0;
+}
+
+int build_group_msg(TLVMessage *_msg, MessageTag _tag, const char *_group_name)
+{
+    if (!_msg || !_group_name)                              return -1;
+    if (_tag != MSG_JOIN_GROUP && _tag != MSG_LEAVE_GROUP)  return -1;
+    if (!is_valid_str(_group_name, MAX_GROUP_NAME_LEN))     return -1;
+
+    size_t glen = strlen(_group_name);
+
+    /* Format: [ glen (1) | group_name ] */
+    if ((1 + glen) > TLV_MAX_VALUE_LEN) return -1;
+
+    _msg->tag         = (uint8_t)_tag;
+    _msg->length      = (uint8_t)(1 + glen);
+    _msg->value[0]    = (uint8_t)glen;
+    memcpy(&_msg->value[1], _group_name, glen);
+
+    return 0;
+}
+
+int build_simple_msg(TLVMessage *_msg, MessageTag _tag)
+{
+    if (!_msg)                                  return -1;
+    if (_tag != MSG_LOGOUT && _tag != MSG_EXIT) return -1;
+
+    _msg->tag    = (uint8_t)_tag;
+    _msg->length = 0;
+
+    return 0;
+}
+
+int build_success_msg(TLVMessage *_msg)
+{
+    if (!_msg) return -1;
+
+    _msg->tag      = (uint8_t)MSG_SUCCESS;
+    _msg->length   = 1;
+    _msg->value[0] = 0;
+
+    return 0;
+}
+
+int build_error_msg(TLVMessage *_msg, ErrorCode _code)
+{
+    if (!_msg) return -1;
+
+    _msg->tag      = (uint8_t)MSG_ERROR;
+    _msg->length   = 1;
+    _msg->value[0] = (uint8_t)_code;
+
+    return 0;
+}
+
+int build_group_info_msg(TLVMessage *_msg, const char *_ip, uint16_t _port)
+{
+    if (!_msg || !_ip)              return -1;
+    if (!is_valid_str(_ip, 16))     return -1;
+
+    size_t   ip_len       = strlen(_ip);
+    uint16_t port_network = htons(_port);
+
+    /* Format: [ ip_len (1) | ip_string | port (2 bytes, network order) ] */
+    if ((1 + ip_len + 2) > TLV_MAX_VALUE_LEN) return -1;
+
+    _msg->tag    = (uint8_t)MSG_GROUP_INFO;
+    _msg->length = (uint8_t)(1 + ip_len + 2);
+
+    uint8_t offset = 0;
+    _msg->value[offset++] = (uint8_t)ip_len;
+    memcpy(&_msg->value[offset], _ip, ip_len);
+    offset += (uint8_t)ip_len;
+    memcpy(&_msg->value[offset], &port_network, 2);
+
+    return 0;
+}
+
+int parse_group_info(const TLVMessage *_msg, char *_ip, uint16_t *_port)
+{
+    if (!_msg || !_ip || !_port)
+    {
+        return -1;
+    }
+
+    if (_msg->tag != (uint8_t)MSG_GROUP_INFO || _msg->length < 3)
+    {
+        return -1;
+    }
+
+    /* Format: [ ip_len (1) | ip_string | port (2 bytes, network order) ] */
+    uint8_t ip_len = _msg->value[0];
+
+    /* Validate: need ip_len + 1 (ip_len byte) + 2 (port bytes) */
+    if ((uint8_t)(1 + ip_len + 2) > _msg->length || ip_len >= 16)
+    {
+        return -1;
+    }
+
+    memcpy(_ip, &_msg->value[1], ip_len);
+    _ip[ip_len] = '\0';
+
+    uint16_t port_network;
+    memcpy(&port_network, &_msg->value[1 + ip_len], 2);
+    *_port = ntohs(port_network);
+
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*                          STATIC HELPERS                                     */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+static int is_valid_str(const char *_str, size_t _max_len)
+{
+    size_t len = strlen(_str);
+    return (len > 0 && len < _max_len);
+}
+
+========== FILE: src/sender.c ==========
+
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+int main(int argc, char *argv[])
+{
+    if (argc != 3)
+    {
+        fprintf(stderr, "Usage: %s <multicast_ip> <username>\n", argv[0]);
+        return 1;
+    }
+
+    const char *multicast_ip = argv[1];
+    const char *username     = argv[2];
+
+    /* Create UDP socket */
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+    {
+        perror("[-] sender: socket creation failed");
+        return 1;
+    }
+
+    /* Set up multicast destination address */
+    struct sockaddr_in dest_addr;
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family      = AF_INET;
+    dest_addr.sin_port        = htons(MULTICAST_BASE_PORT);
+    dest_addr.sin_addr.s_addr = inet_addr(multicast_ip);
+
+    if (dest_addr.sin_addr.s_addr == INADDR_NONE)
+    {
+        fprintf(stderr, "[-] sender: invalid multicast IP: %s\n", multicast_ip);
+        close(sock);
+        return 1;
+    }
+
+    /* Set TTL to 1 — stay on local LAN only */
+    unsigned char ttl = 1;
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0)
+    {
+        perror("[-] sender: setsockopt TTL failed");
+        close(sock);
+        return 1;
+    }
+
+    printf("[sender] Ready. Type messages (Ctrl+C to quit).\n");
+    printf("[sender] Sending as '%s' to %s:%d\n",
+           username, multicast_ip, MULTICAST_BASE_PORT);
+
+    char input[BUFFER_SIZE];
+    char message[BUFFER_SIZE];
+
+    while (1)
+    {
+        printf("> ");
+        fflush(stdout);
+
+        if (fgets(input, sizeof(input), stdin) == NULL)
+        {
+            break; /* EOF or error */
+        }
+
+        /* Strip trailing newline */
+        size_t len = strlen(input);
+        if (len > 0 && input[len - 1] == '\n')
+        {
+            input[len - 1] = '\0';
+        }
+
+        if (strlen(input) == 0)
+        {
+            continue; /* Skip empty messages */
+        }
+
+        /* Format: "[username]: message" */
+        int msg_len = snprintf(message, sizeof(message), "[%s]: %s", username, input);
+        if (msg_len < 0)
+        {
+            continue;
+        }
+
+        if (sendto(sock, message, (size_t)msg_len, 0,
+                   (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0)
+        {
+            perror("[-] sender: sendto failed");
+        }
+    }
+
+    close(sock);
+    return 0;
+}
+
+========== FILE: src/receiver.c ==========
+
+#include "limits.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+int main(int argc, char *argv[])
+{
+    if (argc != 3)
+    {
+        fprintf(stderr, "Usage: %s <multicast_ip> <username>\n", argv[0]);
+        return 1;
+    }
+
+    const char *multicast_ip = argv[1];
+    const char *username     = argv[2];
+
+    /* Create UDP socket */
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+    {
+        perror("[-] receiver: socket creation failed");
+        return 1;
+    }
+
+    /* Allow multiple sockets to use the same port (for multiple receivers) */
+    int reuse = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0)
+    {
+        perror("[-] receiver: setsockopt SO_REUSEADDR failed");
+        close(sock);
+        return 1;
+    }
+
+    /* Bind to the multicast port on any interface */
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family      = AF_INET;
+    local_addr.sin_port        = htons(MULTICAST_BASE_PORT);
+    local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(sock, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0)
+    {
+        perror("[-] receiver: bind failed");
+        close(sock);
+        return 1;
+    }
+
+    /* Join the multicast group */
+    struct ip_mreq group;
+    memset(&group, 0, sizeof(group));
+    group.imr_multiaddr.s_addr = inet_addr(multicast_ip);
+    group.imr_interface.s_addr = htonl(INADDR_ANY);
+
+    if (group.imr_multiaddr.s_addr == INADDR_NONE)
+    {
+        fprintf(stderr, "[-] receiver: invalid multicast IP: %s\n", multicast_ip);
+        close(sock);
+        return 1;
+    }
+
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0)
+    {
+        perror("[-] receiver: setsockopt IP_ADD_MEMBERSHIP failed");
+        close(sock);
+        return 1;
+    }
+
+    printf("[receiver] Listening on %s:%d as '%s'\n",
+           multicast_ip, MULTICAST_BASE_PORT, username);
+
+    char buffer[BUFFER_SIZE];
+
+    while (1)
+    {
+        memset(buffer, 0, sizeof(buffer));
+
+        ssize_t bytes = recvfrom(sock, buffer, sizeof(buffer) - 1,
+                                 0, NULL, NULL);
+        if (bytes < 0)
+        {
+            perror("[-] receiver: recvfrom failed");
+            break;
+        }
+
+        buffer[bytes] = '\0';
+        printf("%s\n", buffer);
+        fflush(stdout);
+    }
+
+    /* Leave multicast group cleanly */
+    setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &group, sizeof(group));
+    close(sock);
+    return 0;
+}
+

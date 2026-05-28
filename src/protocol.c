@@ -148,6 +148,37 @@ int build_group_info_msg(TLVMessage *_msg, const char *_ip, uint16_t _port)
     return 0;
 }
 
+int parse_group_info(const TLVMessage *_msg, char *_ip, uint16_t *_port)
+{
+    if (!_msg || !_ip || !_port)
+    {
+        return -1;
+    }
+
+    if (_msg->tag != (uint8_t)MSG_GROUP_INFO || _msg->length < 3)
+    {
+        return -1;
+    }
+
+    /* Format: [ ip_len (1) | ip_string | port (2 bytes, network order) ] */
+    uint8_t ip_len = _msg->value[0];
+
+    /* Validate: need ip_len + 1 (ip_len byte) + 2 (port bytes) */
+    if ((uint8_t)(1 + ip_len + 2) > _msg->length || ip_len >= 16)
+    {
+        return -1;
+    }
+
+    memcpy(_ip, &_msg->value[1], ip_len);
+    _ip[ip_len] = '\0';
+
+    uint16_t port_network;
+    memcpy(&port_network, &_msg->value[1 + ip_len], 2);
+    *_port = ntohs(port_network);
+
+    return 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════ */
 /*                          STATIC HELPERS                                     */
 /* ═══════════════════════════════════════════════════════════════════════════ */

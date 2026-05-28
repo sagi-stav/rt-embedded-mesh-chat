@@ -3,6 +3,7 @@
 
 /* ─── Network ─────────────────────────────────────── */
 #define SERVER_PORT             9090
+#define SERVER_IP               "127.0.0.1"
 #define SERVER_BACKLOG          10
 #define MAX_CLIENTS             64
 #define BUFFER_SIZE             256
